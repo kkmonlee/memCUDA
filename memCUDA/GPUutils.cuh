@@ -8,7 +8,7 @@
 template<typename T>
 void check(T err, const char* const func, const char* const file, const int line) {
 	if (err != cudaSuccess) {
-		std::cerr << "CUDA got an error at: " << file << ": " << line << std::endl;
+		std::cerr << "CUDA received error at: " << file << ":" << line << std::endl;
 		std::cerr << cudaGetErrorString(err) << " " << func << std::endl;
 		exit(EXIT_FAILURE);
 	}
@@ -24,8 +24,5 @@ public:
 			return nX / nT + 1;
 	}
 };
-
-
-
 
 #endif

@@ -19,7 +19,9 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="GPUArray.cuh" />
     <ClInclude Include="GPUutils.cuh" />
+    <ClInclude Include="Reduce.cuh" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectGuid>{DCF824C1-A610-405F-B61A-1A7CD41CF0FC}</ProjectGuid>
