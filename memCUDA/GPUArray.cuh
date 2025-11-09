@@ -6,120 +6,109 @@
 #include <sstream>
 #include <vector>
 #include <stdexcept>
+#include <memory>
 #include "GPUUtils.cuh"
 
 template<typename T>
 class DeviceArray
 {
 protected:
-	std::size_t m_size;
-	std::vector<T*> md_ptr;
+    std::size_t m_size;
+    std::vector<std::unique_ptr<T, decltype(&cudaFree)>> md_ptr;
 
 private:
-	typedef DeviceArray<T>& reference;
-	typedef const DeviceArray<T>& const_reference;
+    typedef DeviceArray<T>& reference;
+    typedef const DeviceArray<T>& const_reference;
 
 public:
-	DeviceArray(int ngpu = 1) : m_size(0)
-	{
-		int ndev;
-		checkCudaErrors(cudaGetDeviceCount(&ndev));
-		if (ndev > ngpu)
-		{
-			std::stringstream msg;
-			msg << "Error!" << ndev << " devices available, " << ngpu << " is needed." << std::endl;
-			throw std::runtime_error(msg.str());
-		}
-		md_ptr.resize(ngpu, 0);
-	}
+    DeviceArray(int ngpu = 1) : m_size(0), md_ptr(ngpu, {nullptr, cudaFree})
+    {
+        int ndev;
+        checkCudaErrors(cudaGetDeviceCount(&ndev));
+        if (ndev < ngpu)
+        {
+            throw std::runtime_error("Insufficient GPUs available.");
+        }
+    }
 
-	DeviceArray(const_reference src)
-	{
-		md_ptr.resize(src.ngpu(), 0);
-		resize(src.m_size());
-		copy(src);
-	}
+    DeviceArray(const_reference src) : DeviceArray(src.ngpu())
+    {
+        resize(src.m_size);
+        copy(src);
+    }
 
-	reference operator=(const_reference rhs)
-	{
-		if (this != &rhs) {
-			if (ngpu() != rhs.ngpu()) {
-				md_ptr.resize(rhs.ngpu(), 0);
-				resize(rhs.m_size());
-			}
-			else if (size() != rhs.m_size())
-				resize(rhs.m_size());
-			copy(rhs)
-		}
-		return *this;
-	}
+    reference operator=(const_reference rhs)
+    {
+        if (this != &rhs) {
+            if (ngpu() != rhs.ngpu()) {
+                md_ptr.resize(rhs.ngpu(), {nullptr, cudaFree});
+                resize(rhs.m_size);
+            } else if (size() != rhs.m_size()) {
+                resize(rhs.m_size);
+            }
+            copy(rhs);
+        }
+        return *this;
+    }
 
-	void copy(const_reference src)
-	{
-		if (this != &src) {
-			if (bytes() != src.bytes())
-				throw std::out_of_range("The arrays are not of the same size.");
-			for (int i = 0; i < ngpu() && i < src.ngpu(); i++)
-				checkCudaErrors(cudaMemcpy(md_ptr[i], src.DevPtr(i), bytes(), cudaMemcpyDefault));
-		}
+    void copy(const_reference src)
+    {
+        if (this != &src) {
+            if (bytes() != src.bytes())
+                throw std::out_of_range("The arrays are not of the same size.");
+            for (int i = 0; i < ngpu() && i < src.ngpu(); i++)
+                checkCudaErrors(cudaMemcpy(md_ptr[i].get(), src.DevPtr(i), bytes(), cudaMemcpyDefault));
+        }
+    }
 
-	}
+    virtual void resize(std::size_t size)
+    {
+        m_size = size;
+        for (int i = 0; i < ngpu(); i++)
+        {
+            checkCudaErrors(cudaSetDevice(i));
+            md_ptr[i].reset();
+            T* ptr;
+            checkCudaErrors(cudaMalloc((void**)&ptr, bytes()));
+            checkCudaErrors(cudaMemset(ptr, 0, bytes()));
+            md_ptr[i].reset(ptr);
+        }
+    }
 
-	// change  array size
-	virtual void resize(std::size_t size)
-	{
-		m_size = size;
-		for (int i = ngpu(); i--;)
-		{
-			checkCudaErrors(cudaSetDevice(i));
-			if (md_ptr[i]) checkCudaErrors(cudaFree(md_ptr[i]));
-			checkCudaErrors(cudaMalloc((void**)&md_ptr[i], bytes()));
-			checkCudaErrors(cudaMemset(md_ptr[i], 0, bytes()));
-		}
-	}
+    virtual void SetToZero()
+    {
+        for (int i = 0; i < ngpu(); i++) {
+            checkCudaErrors(cudaSetDevice(i));
+            checkCudaErrors(cudaMemset(md_ptr[i].get(), 0, bytes()));
+        }
+    }
 
-	// set error elements to 0
-	virtual void SetToZero()
-	{
-		for (int i = md_ptr.size(); i--;) {
-			checkCudaErrors(cudaSetDevice(i));
-			checkCudaErrors(cudaMemset(md_ptr[i], 0, bytes()));
-		}
-	}
+    virtual std::size_t size() const { return m_size; }
 
-	// backdoor for arraysize to elements
-	virtual std::size_t size() const { return m_size; }
+    virtual std::size_t ngpu() const { return md_ptr.size(); }
 
-	// backdoor for arraysize to bytes
-	virtual std::size_t ngpu()  const { return md_ptr.size(); }
+    virtual T* DevPtr(int gpu_id = 0) const {
+        assert(gpu_id < ngpu());
+        return md_ptr[gpu_id].get();
+    }
 
-	// return point to gpu mem
-	virtual T* DevPtr(int gpu_id = 0) const {
-		assert(gpu_id < ngpu());
-		return md_ptr[gpu_id];
-	}
+    virtual void UpdateSecondaryDevices()
+    {
+        for (int i = 1; i < ngpu(); i++)
+            checkCudaErrors(cudaMemcpy(md_ptr[i].get(), md_ptr[0].get(), bytes(), cudaMemcpyDefault));
+    }
 
-	virtual void UpdateSecondaryDevices()
-	{
-		for (int i = 1; i < ngpu(); i++)
-			checkCudaErrors(cudaMemcpy(md_ptr[i], md_ptr[0], bytes(), cudaMemcpyDefault));
+    virtual void clear()
+    {
+        for (int i = 0; i < ngpu(); i++)
+        {
+            checkCudaErrors(cudaSetDevice(i));
+            md_ptr[i].reset();
+        }
+        m_size = 0;
+    }
 
-	}
-
-	// delete and deallocate
-	virtual void clear()
-	{
-		for (int i = ngpu(); i--;)
-		{
-			checkCudaErrors(cudaSetDevice(i));
-			checkCudaErrors(cudaFree(md_ptr[i]));
-		}
-		m_size = 0;
-		md_ptr.clear();
-	}
-
-	// call it
-	virtual ~DeviceArray() { clear(); }
+    virtual ~DeviceArray() { clear(); }
 };
 template<typename T>
 class DeviceHostArray : public DeviceArray < T >
